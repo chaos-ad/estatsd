@@ -11,7 +11,7 @@
 -module(estatsd_server).
 -behaviour(gen_server).
 
--export([start_link/3]).
+-export([start_link/0]).
 
 %-export([key2str/1,flush/0]). %% export for debugging 
 
@@ -22,49 +22,56 @@
                 flush_interval,     % ms interval between stats flushing
                 flush_timer,        % TRef of interval timer
                 graphite_host,      % graphite server host
-                graphite_port       % graphite server port
+                graphite_port,      % graphite server port
+                graphite_prefix,    % prefix for the key
+                graphite_postfix    % postfix for the key
                }).
 
-start_link(FlushIntervalMs, GraphiteHost, GraphitePort) ->
-    gen_server:start_link({local, ?MODULE}, 
-                          ?MODULE, 
-                          [FlushIntervalMs, GraphiteHost, GraphitePort], 
-                          []).
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%
 
-init([FlushIntervalMs, GraphiteHost, GraphitePort]) ->
+init([]) ->
+    FlushIntervalMs = get_env(flush_interval, 10000),
+    GraphiteHost    = get_env(graphite_host,  "127.0.0.1"),
+    GraphitePort    = get_env(graphite_port,  2003),
+
     error_logger:info_msg("estatsd will flush stats to ~p:~w every ~wms\n", 
                           [ GraphiteHost, GraphitePort, FlushIntervalMs ]),
     ets:new(statsd, [named_table, set]),
     %% Flush out stats to graphite periodically
     {ok, Tref} = timer:apply_interval(FlushIntervalMs, gen_server, cast, 
                                                        [?MODULE, flush]),
-    State = #state{ timers          = gb_trees:empty(),
-                    flush_interval  = FlushIntervalMs,
-                    flush_timer     = Tref,
-                    graphite_host   = GraphiteHost,
-                    graphite_port   = GraphitePort
+    State = #state{ timers           = gb_trees:empty(),
+                    flush_interval   = FlushIntervalMs,
+                    flush_timer      = Tref,
+                    graphite_host    = GraphiteHost,
+                    graphite_port    = GraphitePort,
+                    graphite_prefix  = make_prefix(),
+                    graphite_postfix = make_postfix()
                   },
     {ok, State}.
 
 handle_cast({increment, Key, Delta0, Sample}, State) when Sample >= 0, Sample =< 1 ->
+    FullKey = make_key(Key, State),
     Delta = Delta0 * ( 1 / Sample ), %% account for sample rates < 1.0
-    case ets:lookup(statsd, Key) of
+    case ets:lookup(statsd, FullKey) of
         [] ->
-            ets:insert(statsd, {Key, {Delta,1}});
-        [{Key,{Tot,Times}}] ->
-            ets:insert(statsd, {Key,{Tot+Delta, Times+1}}),
+            ets:insert(statsd, {FullKey, {Delta,1}});
+        [{FullKey,{Tot,Times}}] ->
+            ets:insert(statsd, {FullKey,{Tot+Delta, Times+1}}),
             ok
     end,
     {noreply, State};
 
 handle_cast({timing, Key, Duration}, State) ->
-    case gb_trees:lookup(Key, State#state.timers) of
+    FullKey = make_key(Key, State),
+    case gb_trees:lookup(FullKey, State#state.timers) of
         none ->
-            {noreply, State#state{timers = gb_trees:insert(Key, [Duration], State#state.timers)}};
+            {noreply, State#state{timers = gb_trees:insert(FullKey, [Duration], State#state.timers)}};
         {value, Val} ->
-            {noreply, State#state{timers = gb_trees:update(Key, [Duration|Val], State#state.timers)}}
+            {noreply, State#state{timers = gb_trees:update(FullKey, [Duration|Val], State#state.timers)}}
     end;
 
 handle_cast(flush, State) ->
@@ -85,11 +92,10 @@ terminate(_, _)             -> ok.
 
 %% INTERNAL STUFF
 
-send_to_graphite(Msg, State) ->
-    % io:format("SENDING: ~s\n", [Msg]),
-    case gen_tcp:connect(State#state.graphite_host,
-                         State#state.graphite_port,
-                         [list, {packet, 0}]) of
+send_to_graphite(_, #state{graphite_host=undefined}) -> ok;
+send_to_graphite(Msg, State=#state{graphite_host=Host, graphite_port=Port}) ->
+    %% io:format("SENDING: ~s\n", [Msg]),
+    case gen_tcp:connect(Host, Port, [list, {packet, 0}]) of
         {ok, Sock} ->
             gen_tcp:send(Sock, Msg),
             gen_tcp:close(Sock),
@@ -183,3 +189,44 @@ do_report_timers(TsStr, State) ->
                 [ Fragment | Acc ]
         end, [], Timings),
     {Msg, length(Msg)}.
+
+%% ==========================================================================
+
+get_env(Key, Default) ->
+    case application:get_env(estatsd, Key) of
+        {ok, Value} -> Value;
+        undefined -> Default
+    end.
+
+make_key(Key, #state{graphite_prefix=Prefix, graphite_postfix=Postfix}) ->
+    lists:concat([Prefix, Key, Postfix]).
+
+make_prefix() ->
+    Env  = append_dot(get_env(graphite_env, "")), 
+    App  = append_dot(get_env(graphite_app, "")), 
+    Team = append_dot(get_env(graphite_team, "")),
+    lists:concat([Env, App, Team]).
+
+make_postfix() ->
+    case get_env(append_node, false) of
+        true  -> prepend_dot(node_key());
+        false -> ""
+    end.
+
+append_dot("") -> "";
+append_dot(Str) -> Str ++ ".".
+prepend_dot("") -> "";
+prepend_dot(Str) -> "." ++ Str.
+
+node_key() ->
+    node_key(atom_to_list(node())).
+
+node_key(Node) ->
+    {NodeName, HostName} = split(Node, $@),
+    {ShortName, _} = split(HostName, $.),
+    lists:concat([NodeName, ".", ShortName]).
+
+split(List, Char) -> split(List, Char, []).
+split([], _, Acc) -> {lists:reverse(Acc), []};
+split([V|T], V, Acc) -> {lists:reverse(Acc), T};
+split([H|T], V, Acc) -> split(T, V, [H|Acc]).
