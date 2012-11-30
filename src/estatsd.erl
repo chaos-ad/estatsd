@@ -29,7 +29,7 @@ increment(Key, Amount) -> increment(Key, Amount, 1).
 increment(Key, Amount, Sample) ->
     gen_server:cast(?SERVER, {increment, Key, Amount, Sample}).
 
-decrement(Key) -> decrement(Key, -1, 1).
+decrement(Key) -> decrement(Key, 1, 1).
 decrement(Key, Amount) -> decrement(Key, Amount, 1).
 decrement(Key, Amount, Sample) ->
     increment(Key, 0 - Amount, Sample).
