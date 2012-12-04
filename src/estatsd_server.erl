@@ -208,23 +208,25 @@ make_prefix() ->
     lists:concat([Env, App, Team]).
 
 make_postfix() ->
-    case get_env(append_node, false) of
-        true  -> prepend_dot(node_key());
-        false -> ""
-    end.
+    WithNodeName = get_env(append_nodename, false),
+    WithHostName = get_env(append_hostname, false),
+    prepend_dot(node_key(WithNodeName, WithHostName)).
 
 append_dot("") -> "";
 append_dot(Str) -> Str ++ ".".
 prepend_dot("") -> "";
 prepend_dot(Str) -> "." ++ Str.
 
-node_key() ->
-    node_key(atom_to_list(node())).
-
-node_key(Node) ->
+node_key(WithNodeName, WithHostName) ->
+    Node = atom_to_list(node()),
     {NodeName, HostName} = split(Node, $@),
-    {ShortName, _} = split(HostName, $.),
-    lists:concat([NodeName, ".", ShortName]).
+    {ShortName, _Rest} = split(HostName, $.),
+    case {WithNodeName, WithHostName} of
+        {true, true}   -> lists:concat([NodeName, ".", ShortName]);
+        {true, false}  -> NodeName;
+        {false, true}  -> ShortName;
+        {false, false} -> ""
+    end.
 
 split(List, Char) -> split(List, Char, []).
 split([], _, Acc) -> {lists:reverse(Acc), []};
